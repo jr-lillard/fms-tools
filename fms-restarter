@@ -1,0 +1,439 @@
+#!/bin/bash
+
+# Configuration directory and files
+CONFIG_DIR="${HOME}/.fms-restarter"
+CONFIG_FILE="${CONFIG_DIR}/fms-restarter.config"
+CLIENTS_LIST="${CONFIG_DIR}/fmsadmin-list-clients"
+FILES_LIST="${CONFIG_DIR}/fmsadmin-list-files"
+CLOSE_LOG="${CONFIG_DIR}/fmsadmin-close-log"
+# Track counts of files closed and currently open
+FILES_CLOSED_COUNT=0
+FILES_OPEN_COUNT=0
+RESTART_FLAG="${CONFIG_DIR}/fms-restart-needed"
+# Password encryption key (not secret but avoids plain text storage)
+ENCRYPT_KEY="fms-restarter"
+
+# Track whether extra command output should be displayed
+VERBOSE=0
+
+# Helper functions for encrypting and decrypting passwords
+encrypt_password() {
+    local plaintext="$1"
+    printf '%s' "$plaintext" | openssl enc -aes-256-cbc -a -salt -pbkdf2 \
+        -pass pass:"$ENCRYPT_KEY" 2>/dev/null
+}
+
+decrypt_password() {
+    local ciphertext="$1"
+    printf '%s\n' "$ciphertext" | openssl enc -aes-256-cbc -a -d -salt -pbkdf2 \
+        -pass pass:"$ENCRYPT_KEY" 2>/dev/null
+}
+show_help() {
+    echo
+    cat <<EOF
+  fms-restarter.sh - gracefully restart FileMaker Server when it is safe to do so.
+
+  Usage: $0 [--configure|--restart-soon|--show-config|--verbose|--help]
+
+  --configure     Launch an interactive wizard to set up the fms-restarter configuration.
+  --restart-soon  Create a flag that triggers a restart on the next run.
+  --show-config   Display the current configuration values.
+  --verbose       Display raw output from fmsadmin commands.
+  --help          Display this help message and exit.
+
+  Running without options checks whether the restart flag is present and
+  restarts FileMaker Server if no clients are connected and no files are open.
+EOF
+    echo
+}
+
+show_missing_config() {
+    cat >&2 <<EOF
+
+  It looks like this is your first time running fms-restarter.
+  The configuration file was not found.
+
+  Expected directory: $CONFIG_DIR
+  Expected file:      $CONFIG_FILE
+
+  Run "$0 --configure" to create the configuration.
+  Example:
+    $0 --configure
+EOF
+
+    echo >&2
+}
+
+
+
+configure() {
+    echo
+    mkdir -p "$CONFIG_DIR"
+
+    echo "  This wizard will create or update the fms-restarter configuration."
+    echo
+    echo "  Settings will be saved to $CONFIG_FILE"
+    echo
+
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        if [[ -n "$FMS_PASSWORD_ENC" ]]; then
+            FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
+        fi
+        echo "  Existing configuration detected; current values are shown in brackets."
+        echo
+    fi
+
+    if [[ -z "$FMS_ADMIN" ]]; then
+        candidate=$(command -v fmsadmin 2>/dev/null)
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            FMS_ADMIN="$candidate"
+        else
+            candidate=$(command -v fmsadmin.exe 2>/dev/null)
+            if [[ -n "$candidate" && -x "$candidate" ]]; then
+                FMS_ADMIN="$candidate"
+            fi
+        fi
+    fi
+
+    echo "  Specify the full path to the 'fmsadmin' command."
+    read -rp "  Path to fmsadmin [${FMS_ADMIN:-}] : " input
+    FMS_ADMIN=${input:-$FMS_ADMIN}
+    echo
+
+    echo "  Enter the username used for fmsadmin / FileMaker Server Admin Console."
+    read -rp "  Username [${FMS_USERNAME:-}] : " input
+    FMS_USERNAME=${input:-$FMS_USERNAME}
+    echo
+
+    echo "  Enter the password for the username above."
+    echo "  The password will be stored encrypted in $CONFIG_FILE."
+    if [[ -n "$FMS_PASSWORD" ]]; then
+        read -srp "  Password [********] : " input
+        echo
+        FMS_PASSWORD=${input:-$FMS_PASSWORD}
+    else
+        read -srp "  Password : " FMS_PASSWORD
+        echo
+    fi
+
+    FMS_PASSWORD_ENC=$(encrypt_password "$FMS_PASSWORD")
+    cat > "$CONFIG_FILE" <<EOF_CONF
+FMS_ADMIN="${FMS_ADMIN}"
+FMS_USERNAME="${FMS_USERNAME}"
+FMS_PASSWORD_ENC="${FMS_PASSWORD_ENC}"
+EOF_CONF
+
+    echo
+    echo "  Configuration saved to $CONFIG_FILE"
+
+    echo
+}
+
+show_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        show_missing_config
+        return 1
+    fi
+
+    source "$CONFIG_FILE"
+    if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
+        FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
+    fi
+
+    # Remove any carriage returns that might be present
+    FMS_ADMIN=${FMS_ADMIN//$'\r'/}
+    FMS_USERNAME=${FMS_USERNAME//$'\r'/}
+    FMS_PASSWORD=${FMS_PASSWORD//$'\r'/}
+
+    echo
+    echo "     FMS_ADMIN: $FMS_ADMIN"
+    echo "  FMS_USERNAME: $FMS_USERNAME"
+    echo "  FMS_PASSWORD: $FMS_PASSWORD"
+    echo
+}
+
+# Helper to run an fmsadmin command in non-verbose mode while still
+# showing any error output if the command fails. The command is executed
+# with all of its arguments. Standard output is suppressed unless VERBOSE
+# is enabled. Standard error is always shown.
+run_fmsadmin() {
+    if [[ $VERBOSE -eq 1 ]]; then
+        "$@"
+        return $?
+    else
+        local output
+        output=$("$@" 2>&1 >/dev/null)
+        local status=$?
+        if [[ $status -ne 0 ]]; then
+            echo "$output"
+        fi
+        return "$status"
+    fi
+}
+
+# Check for a --verbose flag before processing other options
+if [[ "$1" == "--verbose" ]]; then
+    VERBOSE=1
+    shift
+fi
+
+if [[ "$1" == "--restart-soon" ]]; then
+    if [[ ! -d "$CONFIG_DIR" ]]; then
+        show_missing_config
+        exit 1
+    fi
+    touch "$RESTART_FLAG"
+    echo
+    echo "  Restart flag created at $RESTART_FLAG"
+    echo
+    exit 0
+elif [[ "$1" == "--configure" ]]; then
+    configure
+    exit $?
+elif [[ "$1" == "--show-config" ]]; then
+    show_config > >(sed 's/^/  /') 2> >(sed 's/^/  /' >&2)
+    exit $?
+elif [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    show_help
+    exit 0
+fi
+
+function clients_are_connected () {
+
+    echo -n "fmsadmin list clients..."
+    "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" list clients > "$CLIENTS_LIST"
+    status=$?
+
+    if [[ $status -ne 0 || ! -f "$CLIENTS_LIST" ]] ; then
+        echo "failed"
+        return 1
+    fi
+
+    count=$(wc -l < "$CLIENTS_LIST")
+    if [[ $count -eq 0 ]]; then
+        echo "0 connected"
+        return 1
+    fi
+
+    if [[ $VERBOSE -eq 1 && -s "$CLIENTS_LIST" ]]; then
+        echo
+        echo
+        cat "$CLIENTS_LIST"
+        echo
+    fi
+
+    count=$((count - 1))
+    # Prefix the count with an ellipsis in verbose mode so the final
+    # output mirrors the non-verbose case, e.g.
+    #   fmsadmin list clients...
+    #   ...1 connected
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo -n "...${count} connected"
+    else
+        echo -n "${count} connected"
+    fi
+    return 0
+
+}
+
+function files_are_open () {
+
+    echo
+    echo -n "fmsadmin list files..."
+    "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" list files 2>&1 > "$FILES_LIST"
+    status=$?
+
+    if [[ $status -ne 0 ]] ; then
+        echo "failed"
+        return "$status"
+    fi
+
+    FILES_OPEN_COUNT=$(grep -c . "$FILES_LIST")
+
+    if [[ $VERBOSE -eq 1 && -s "$FILES_LIST" ]]; then
+        echo
+        echo
+        cat "$FILES_LIST"
+        echo
+    fi
+
+    if [[ $FILES_OPEN_COUNT -gt 0 ]]; then
+        if [[ $VERBOSE -eq 1 ]]; then
+            echo "...${FILES_OPEN_COUNT} files open"
+        else
+            echo "${FILES_OPEN_COUNT} files open"
+        fi
+        return 0
+    else
+        echo "0 files open"
+        return 1
+    fi
+
+}
+
+function fmsadmin_close () {
+
+                if clients_are_connected ; then
+                                echo "...aborting restart"
+                                return 1
+                fi
+
+                if ! files_are_open ; then
+                                echo
+                                echo "No files are open."
+                                return 1
+                fi
+
+                echo
+                if [[ $VERBOSE -eq 1 ]]; then
+                                echo "fmsadmin close..."
+                                echo
+                                "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" close --yes | tee "$CLOSE_LOG"
+                                status=${PIPESTATUS[0]}
+                else
+               echo -n "fmsadmin close..."
+                                "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" close --yes > "$CLOSE_LOG"
+                                status=$?
+                fi
+                if [[ $status -ne 0 ]]; then
+                                echo "failed"
+                                return "$status"
+                fi
+
+                FILES_CLOSED_COUNT=$(grep -c '^File Closed:' "$CLOSE_LOG")
+                if [[ $VERBOSE -eq 1 ]]; then
+                                echo
+                                echo "...${FILES_CLOSED_COUNT} files closed"
+                else
+                                echo "${FILES_CLOSED_COUNT} files closed"
+                fi
+                return 0
+
+}
+
+function fmsadmin_open () {
+
+                files_are_open
+                return $?
+}
+
+function fms_restart () {
+
+                # fmsadmin_close performs its own client check, so avoid calling
+                # clients_are_connected twice.
+                fmsadmin_close || return 1
+
+		if files_are_open ; then
+				echo
+				echo "Files are open.  Abort."
+				return 1
+		fi
+
+                echo
+                echo "fmsadmin stop adminserver..."
+                run_fmsadmin "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" stop adminserver --yes
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                                echo "failed"
+                                return "$status"
+                fi
+                echo
+
+                echo "fmsadmin stop server..."
+                run_fmsadmin "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" stop server --yes
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                                echo "failed"
+                                return "$status"
+                fi
+                echo
+
+                echo "fmsadmin start server..."
+                run_fmsadmin "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" start server
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                                echo "failed"
+                                return "$status"
+                fi
+                echo
+
+                echo "fmsadmin start adminserver..."
+                run_fmsadmin "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" start adminserver
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                                echo "failed"
+                                return "$status"
+                fi
+
+                rm "$RESTART_FLAG"
+
+                while true ; do
+
+                                files_are_open
+                                if [[ $FILES_OPEN_COUNT -eq $FILES_CLOSED_COUNT ]]; then
+                                                break
+                                fi
+
+                done
+                return 0
+
+}
+
+run_default() {
+    if [[ ! -d "$CONFIG_DIR" || ! -f "$CONFIG_FILE" ]]; then
+        show_missing_config
+        return 1
+    fi
+
+    source "$CONFIG_FILE"
+    if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
+        FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
+    fi
+
+    # Remove any carriage returns from config values in case the file
+    # was edited on Windows. Trailing CR characters cause fmsadmin to
+    # ignore the provided password and prompt interactively.
+    FMS_ADMIN=${FMS_ADMIN//$'\r'/}
+    FMS_USERNAME=${FMS_USERNAME//$'\r'/}
+    FMS_PASSWORD=${FMS_PASSWORD//$'\r'/}
+
+    echo -n "$(date)"
+
+    if [[ -f "$RESTART_FLAG" ]] ; then
+
+        echo " - FMS restart is needed"
+
+        # Add a blank line before printing detailed command output
+        echo
+
+        if fms_restart ; then
+            echo
+            echo -n "$(date)"
+            echo " - FMS restarted"
+        else
+            echo
+            echo -n "$(date)"
+            echo " - FMS restart aborted"
+        fi
+
+    else
+
+        echo " - FMS restart is not needed"
+
+    fi
+
+    rm -f "$CLIENTS_LIST"
+    rm -f "$FILES_LIST"
+    rm -f "$CLOSE_LOG"
+}
+
+if [[ $# -eq 0 ]]; then
+    echo
+    run_default > >(sed 's/^/  /') 2> >(sed 's/^/  /' >&2)
+    status=$?
+    echo
+    exit $status
+else
+    run_default "$@"
+fi
