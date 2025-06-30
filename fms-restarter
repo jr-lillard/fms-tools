@@ -117,10 +117,20 @@ configure() {
     fi
 
     FMS_PASSWORD_ENC=$(encrypt_password "$FMS_PASSWORD")
+
+    # Preserve any existing configuration options that are not managed by
+    # fms-restarter. This avoids wiping settings used by other tools that
+    # share the same configuration file (e.g. fms-certbot-deployer).
+    OTHER_CONFIG=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        OTHER_CONFIG=$(grep -vE '^(FMS_ADMIN|FMS_USERNAME|FMS_PASSWORD_ENC)=' "$CONFIG_FILE" || true)
+    fi
+
     cat > "$CONFIG_FILE" <<EOF_CONF
 FMS_ADMIN="${FMS_ADMIN}"
 FMS_USERNAME="${FMS_USERNAME}"
 FMS_PASSWORD_ENC="${FMS_PASSWORD_ENC}"
+${OTHER_CONFIG}
 EOF_CONF
 
     echo
