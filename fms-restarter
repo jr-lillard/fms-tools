@@ -3,6 +3,7 @@
 # Configuration directory and files
 CONFIG_DIR="${HOME}/.fms-tools"
 CONFIG_FILE="${CONFIG_DIR}/fms-restarter.config"
+FMSADMIN_FILE="${CONFIG_DIR}/fmsadmin.config"
 CLIENTS_LIST="${CONFIG_DIR}/fmsadmin-list-clients"
 FILES_LIST="${CONFIG_DIR}/fmsadmin-list-files"
 CLOSE_LOG="${CONFIG_DIR}/fmsadmin-close-log"
@@ -51,10 +52,12 @@ show_missing_config() {
     cat >&2 <<EOF
 
   It looks like this is your first time running fms-restarter.
-  The configuration file was not found.
+  One or more configuration files were not found.
 
   Expected directory: $CONFIG_DIR
-  Expected file:      $CONFIG_FILE
+  Expected files:
+    $CONFIG_FILE
+    $FMSADMIN_FILE
 
   Run "$0 --configure" to create the configuration.
   Example:
@@ -72,14 +75,19 @@ configure() {
 
     echo "  This wizard will create or update the fms-restarter configuration."
     echo
-    echo "  Settings will be saved to $CONFIG_FILE"
+    echo "  Settings will be saved to $CONFIG_FILE and $FMSADMIN_FILE"
     echo
 
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
+    fi
+    if [ -f "$FMSADMIN_FILE" ]; then
+        source "$FMSADMIN_FILE"
         if [[ -n "$FMS_PASSWORD_ENC" ]]; then
             FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
         fi
+    fi
+    if [ -f "$CONFIG_FILE" ] || [ -f "$FMSADMIN_FILE" ]; then
         echo "  Existing configuration detected; current values are shown in brackets."
         echo
     fi
@@ -107,7 +115,7 @@ configure() {
     echo
 
     echo "  Enter the password for the username above."
-    echo "  The password will be stored encrypted in $CONFIG_FILE."
+    echo "  The password will be stored encrypted in $FMSADMIN_FILE."
     if [[ -n "$FMS_PASSWORD" ]]; then
         read -srp "  Password [********] : " input
         echo
@@ -118,25 +126,28 @@ configure() {
     fi
 
     FMS_PASSWORD_ENC=$(encrypt_password "$FMS_PASSWORD")
-    cat > "$CONFIG_FILE" <<EOF_CONF
+    cat > "$FMSADMIN_FILE" <<EOF_ADMIN
 FMS_ADMIN="${FMS_ADMIN}"
 FMS_USERNAME="${FMS_USERNAME}"
 FMS_PASSWORD_ENC="${FMS_PASSWORD_ENC}"
-EOF_CONF
+EOF_ADMIN
+
+    touch "$CONFIG_FILE"
 
     echo
-    echo "  Configuration saved to $CONFIG_FILE"
+    echo "  Configuration saved to $FMSADMIN_FILE"
 
     echo
 }
 
 show_config() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
+    if [[ ! -f "$CONFIG_FILE" || ! -f "$FMSADMIN_FILE" ]]; then
         show_missing_config
         return 1
     fi
 
     source "$CONFIG_FILE"
+    source "$FMSADMIN_FILE"
     if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
         FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
     fi
@@ -381,12 +392,13 @@ function fms_restart () {
 }
 
 run_default() {
-    if [[ ! -d "$CONFIG_DIR" || ! -f "$CONFIG_FILE" ]]; then
+    if [[ ! -d "$CONFIG_DIR" || ! -f "$CONFIG_FILE" || ! -f "$FMSADMIN_FILE" ]]; then
         show_missing_config
         return 1
     fi
 
     source "$CONFIG_FILE"
+    source "$FMSADMIN_FILE"
     if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
         FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
     fi
