@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration directory and files
-CONFIG_DIR="${HOME}/.fms-restarter"
+CONFIG_DIR="${HOME}/.fms-tools"
 CONFIG_FILE="${CONFIG_DIR}/fms-restarter.config"
 CLIENTS_LIST="${CONFIG_DIR}/fmsadmin-list-clients"
 FILES_LIST="${CONFIG_DIR}/fmsadmin-list-files"
