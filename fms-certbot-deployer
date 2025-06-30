@@ -2,8 +2,7 @@
 
 # Configuration directory and files
 CONFIG_DIR="${HOME}/.fms-tools"
-CONFIG_FILE="${CONFIG_DIR}/fms-certbot-deployer.config"
-FMSADMIN_FILE="${CONFIG_DIR}/fmsadmin.config"
+CONFIG_FILE="${CONFIG_DIR}/fms-tools.config"
 
 # Password encryption key (not secret but avoids plain text storage)
 ENCRYPT_KEY="fms-certbot-deployer"
@@ -48,9 +47,8 @@ show_missing_config() {
   One or more configuration files were not found.
 
   Expected directory: $CONFIG_DIR
-  Expected files:
+  Expected file:
     $CONFIG_FILE
-    $FMSADMIN_FILE
 
   Run "$0 --configure" to create the configuration.
   Example:
@@ -66,19 +64,16 @@ configure() {
 
     echo "  This wizard will create or update the FileMaker Server configuration."
     echo
-    echo "  Settings will be saved to $CONFIG_FILE and $FMSADMIN_FILE"
+    echo "  Settings will be saved to $CONFIG_FILE"
     echo
 
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
-    fi
-    if [ -f "$FMSADMIN_FILE" ]; then
-        source "$FMSADMIN_FILE"
         if [[ -n "$FMS_PASSWORD_ENC" ]]; then
             FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
         fi
     fi
-    if [ -f "$CONFIG_FILE" ] || [ -f "$FMSADMIN_FILE" ]; then
+    if [ -f "$CONFIG_FILE" ]; then
         echo "  Existing configuration detected; current values are shown in brackets."
         echo
     fi
@@ -106,7 +101,7 @@ configure() {
     echo
 
     echo "  Enter the password for the username above."
-    echo "  The password will be stored encrypted in $FMSADMIN_FILE."
+    echo "  The password will be stored encrypted in $CONFIG_FILE."
     if [[ -n "$FMS_PASSWORD" ]]; then
         read -srp "  Password [********] : " input
         echo
@@ -137,29 +132,25 @@ configure() {
 
     FMS_PASSWORD_ENC=$(encrypt_password "$FMS_PASSWORD")
     cat > "$CONFIG_FILE" <<EOF_CONF
+FMS_ADMIN="${FMS_ADMIN}"
+FMS_USERNAME="${FMS_USERNAME}"
+FMS_PASSWORD_ENC="${FMS_PASSWORD_ENC}"
 FMS_CSTORE="${FMS_CSTORE}"
 CERTBOT_DOMAIN="${CERTBOT_DOMAIN}"
 EOF_CONF
 
-    cat > "$FMSADMIN_FILE" <<EOF_ADMIN
-FMS_ADMIN="${FMS_ADMIN}"
-FMS_USERNAME="${FMS_USERNAME}"
-FMS_PASSWORD_ENC="${FMS_PASSWORD_ENC}"
-EOF_ADMIN
-
-    echo "  Configuration saved to $CONFIG_FILE and $FMSADMIN_FILE"
+    echo "  Configuration saved to $CONFIG_FILE"
 
     echo
 }
 
 show_config() {
-    if [[ ! -f "$CONFIG_FILE" || ! -f "$FMSADMIN_FILE" ]]; then
+    if [[ ! -f "$CONFIG_FILE" ]]; then
         show_missing_config
         return 1
     fi
 
     source "$CONFIG_FILE"
-    source "$FMSADMIN_FILE"
     if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
         FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
     fi
@@ -195,13 +186,12 @@ run_fmsadmin() {
 }
 
 run_default() {
-    if [[ ! -d "$CONFIG_DIR" || ! -f "$CONFIG_FILE" || ! -f "$FMSADMIN_FILE" ]]; then
+    if [[ ! -d "$CONFIG_DIR" || ! -f "$CONFIG_FILE" ]]; then
         show_missing_config
         return 1
     fi
 
     source "$CONFIG_FILE"
-    source "$FMSADMIN_FILE"
     if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
         FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
     fi
