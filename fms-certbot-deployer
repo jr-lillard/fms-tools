@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration directory and files
-CONFIG_DIR="${HOME}/.fms-certbot-deployer"
+CONFIG_DIR="${HOME}/.fms-tools"
 CONFIG_FILE="${CONFIG_DIR}/fms-certbot-deployer.config"
 
 # Password encryption key (not secret but avoids plain text storage)
