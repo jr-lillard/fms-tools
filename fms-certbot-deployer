@@ -4,8 +4,9 @@
 CONFIG_DIR="${HOME}/.fms-tools"
 CONFIG_FILE="${CONFIG_DIR}/fms-tools.config"
 
-# Password encryption key (not secret but avoids plain text storage)
-ENCRYPT_KEY="fms-certbot-deployer"
+# Password encryption key shared across all fms-tools (not secret but avoids
+# plain text storage)
+ENCRYPT_KEY="fms-tools"
 
 # Track whether extra command output should be displayed
 VERBOSE=0

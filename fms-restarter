@@ -10,8 +10,9 @@ CLOSE_LOG="${CONFIG_DIR}/fmsadmin-close-log"
 FILES_CLOSED_COUNT=0
 FILES_OPEN_COUNT=0
 RESTART_FLAG="${CONFIG_DIR}/fms-restart-needed"
-# Password encryption key (not secret but avoids plain text storage)
-ENCRYPT_KEY="fms-restarter"
+# Password encryption key shared across all fms-tools (not secret but avoids
+# plain text storage)
+ENCRYPT_KEY="fms-tools"
 
 # Track whether extra command output should be displayed
 VERBOSE=0
