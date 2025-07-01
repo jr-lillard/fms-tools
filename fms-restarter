@@ -439,6 +439,7 @@ run_default() {
 }
 
 if [[ $# -eq 0 ]]; then
+    echo
     run_default > >(sed 's/^/  /') 2> >(sed 's/^/  /' >&2)
     status=$?
     echo
