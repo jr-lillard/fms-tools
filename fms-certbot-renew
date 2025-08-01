@@ -1,0 +1,364 @@
+#!/bin/bash
+
+# Configuration file lives next to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/server.conf"
+
+# Portable in-place sed helper for GNU and BSD sed
+sed_inplace() {
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$1" "$2"
+    else
+        sed -i '' "$1" "$2"
+    fi
+}
+
+update_self_path() {
+    local var_name path
+    var_name=$(basename "${BASH_SOURCE[0]}")
+    var_name=$(printf '%s' "$var_name" | tr '[:lower:]' '[:upper:]')
+    var_name=${var_name//-/_}
+    path="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+    if grep -q "^${var_name}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed_inplace "s|^${var_name}=.*|${var_name}=\\\"${path}\\\"|" "$CONFIG_FILE"
+    else
+        echo "${var_name}=\"${path}\"" >> "$CONFIG_FILE"
+    fi
+}
+
+update_self_path
+
+random_key() {
+    openssl rand -hex 16
+}
+
+# Update or insert a configuration variable into $CONFIG_FILE
+set_config_var() {
+    local key="$1" value="$2"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed_inplace "s|^${key}=.*|${key}=\\\"${value}\\\"|" "$CONFIG_FILE"
+    else
+        echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
+    fi
+}
+
+encrypt_password() {
+    local plaintext="$1"
+    printf '%s' "$plaintext" | openssl enc -aes-256-cbc -a -salt -pbkdf2 \
+        -pass pass:"$ENCRYPT_KEY" 2>/dev/null
+}
+
+decrypt_password() {
+    local ciphertext="$1"
+    printf '%s\n' "$ciphertext" | openssl enc -aes-256-cbc -a -d -salt -pbkdf2 \
+        -pass pass:"$ENCRYPT_KEY" 2>/dev/null
+}
+
+# Flags set via command line
+DRY_RUN=0
+FORCE=0
+VERBOSE=0
+
+indent_output() { sed 's/^/  /'; }
+
+show_help() {
+    echo
+    cat <<'EOH'
+  fms-certbot-renew - monitor and renew Let's Encrypt certificates for FileMaker Server.
+
+  --configure   Launch an interactive wizard to set up the configuration.
+  --dry-run     Perform a trial run without making changes.
+  --force       Force renewal even if not near expiry.
+  --help        Display this help message and exit.
+  --renew       Run certbot certificates.
+  --show-config Display the current configuration values.
+  --verbose     Display additional output.
+
+  The renewal process is not implemented in this version of the script.
+EOH
+    echo
+}
+
+show_missing_config() {
+    cat >&2 <<EOM
+
+  It looks like this is your first time running fms-certbot-renew.
+  The configuration file was not found.
+
+  Expected file: $CONFIG_FILE
+
+  Run "$0 --configure" to create the configuration.
+  Example:
+    $0 --configure
+EOM
+
+    echo >&2
+}
+
+configure() {
+    echo
+    echo "  This wizard will create or update the FileMaker Server configuration."
+    echo
+    echo "  Settings will be saved to $CONFIG_FILE"
+    echo
+
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        if [[ -n "$FMS_PASSWORD_ENC" ]]; then
+            FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
+        fi
+        ENCRYPT_KEY="${ENCRYPT_KEY:-$(random_key)}"
+        echo "  Existing configuration detected; current values are shown in brackets."
+        echo
+    else
+        ENCRYPT_KEY="$(random_key)"
+    fi
+
+    if [[ -z "$FMS_ADMIN" ]]; then
+        candidate=$(command -v fmsadmin 2>/dev/null)
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            FMS_ADMIN="$candidate"
+        else
+            candidate=$(command -v fmsadmin.exe 2>/dev/null)
+            if [[ -n "$candidate" && -x "$candidate" ]]; then
+                FMS_ADMIN="$candidate"
+            fi
+        fi
+    fi
+
+    echo "  Specify the full path to the 'fmsadmin' command."
+    read -rp "  Path to fmsadmin [${FMS_ADMIN:-}] : " input
+    FMS_ADMIN=${input:-$FMS_ADMIN}
+    echo
+
+    echo "  Enter the username used for fmsadmin / FileMaker Server Admin Console."
+    read -rp "  Username [${FMS_USERNAME:-}] : " input
+    FMS_USERNAME=${input:-$FMS_USERNAME}
+    echo
+
+    echo "  Enter the password for the username above."
+    echo "  The password will be stored encrypted in $CONFIG_FILE."
+    if [[ -n "$FMS_PASSWORD" ]]; then
+        read -srp "  Password [********] : " input
+        echo
+        FMS_PASSWORD=${input:-$FMS_PASSWORD}
+    else
+        read -srp "  Password : " FMS_PASSWORD
+        echo
+    fi
+
+    echo
+
+    if [[ -z "$FMS_CSTORE" ]]; then
+        if [[ -d "/opt/FileMaker/FileMaker Server/CStore/" ]]; then
+            FMS_CSTORE="/opt/FileMaker/FileMaker Server/CStore/"
+        elif [[ -d "/Library/FileMaker Server/CStore/" ]]; then
+            FMS_CSTORE="/Library/FileMaker Server/CStore/"
+        elif [[ -d "/mnt/c/Program Files/FileMaker/FileMaker Server/CStore/" ]]; then
+            FMS_CSTORE="/mnt/c/Program Files/FileMaker/FileMaker Server/CStore/"
+        fi
+    fi
+    echo "  Specify the full path to the FileMaker Server CStore directory."
+    read -rp "  CStore folder [${FMS_CSTORE:-}] : " input
+    FMS_CSTORE=${input:-$FMS_CSTORE}
+    echo
+
+    local default_domain="$CERTBOT_DOMAIN"
+    if [[ -z "$default_domain" || ! -d "/etc/letsencrypt/live/$default_domain" ]]; then
+        if [[ -d /etc/letsencrypt/archive/ ]]; then
+            candidate=$(find /etc/letsencrypt/archive/ -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n1)
+            if [[ -n "$candidate" ]]; then
+                default_domain=$(basename "$candidate")
+            fi
+        fi
+    fi
+    echo "  Enter the primary domain used with certbot."
+    read -rp "  Certbot domain [${default_domain:-}] : " input
+    CERTBOT_DOMAIN=${input:-$default_domain}
+    echo
+
+    FMS_PASSWORD_ENC=$(encrypt_password "$FMS_PASSWORD")
+    set_config_var "ENCRYPT_KEY" "$ENCRYPT_KEY"
+    set_config_var "FMS_ADMIN" "$FMS_ADMIN"
+    set_config_var "FMS_USERNAME" "$FMS_USERNAME"
+    set_config_var "FMS_PASSWORD_ENC" "$FMS_PASSWORD_ENC"
+    set_config_var "FMS_CSTORE" "$FMS_CSTORE"
+    set_config_var "CERTBOT_DOMAIN" "$CERTBOT_DOMAIN"
+
+    echo "  Configuration saved to $CONFIG_FILE"
+    echo
+}
+
+show_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        show_missing_config
+        return 1
+    fi
+
+    source "$CONFIG_FILE"
+    ENCRYPT_KEY="${ENCRYPT_KEY:-$(random_key)}"
+    if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
+        FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
+    fi
+
+    FMS_ADMIN=${FMS_ADMIN//$'\r'/}
+    FMS_USERNAME=${FMS_USERNAME//$'\r'/}
+    FMS_PASSWORD=${FMS_PASSWORD//$'\r'/}
+    FMS_CSTORE=${FMS_CSTORE//$'\r'/}
+    CERTBOT_DOMAIN=${CERTBOT_DOMAIN//$'\r'/}
+
+    echo
+    local names=(
+        "FMS_ADMIN" "FMS_USERNAME" "FMS_PASSWORD" "FMS_CSTORE" "CERTBOT_DOMAIN"
+    )
+    local max=0
+    for name in "${names[@]}"; do
+        (( ${#name} > max )) && max=${#name}
+    done
+    local fmt="%${max}s: %s\n"
+
+    printf "$fmt" "FMS_ADMIN" "$FMS_ADMIN"
+    printf "$fmt" "FMS_USERNAME" "$FMS_USERNAME"
+    printf "$fmt" "FMS_PASSWORD" "$FMS_PASSWORD"
+    printf "$fmt" "FMS_CSTORE" "$FMS_CSTORE"
+    printf "$fmt" "CERTBOT_DOMAIN" "$CERTBOT_DOMAIN"
+    echo
+}
+
+renew() {
+    echo
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        show_missing_config
+        return 1
+    fi
+
+    source "$CONFIG_FILE"
+    CERTBOT_DOMAIN=${CERTBOT_DOMAIN//$'\r'/}
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo "Running certbot certificates..."
+        echo
+    fi
+
+    local output
+    output=$(certbot certificates 2>&1)
+    printf '%s\n' "$output"
+
+    local domain_line expiry_line status days domain_found
+    domain_line=""
+    expiry_line=""
+    status=""
+    days=""
+    domain_found=0
+
+    while IFS= read -r line; do
+        if [[ $domain_found -eq 0 && $line == [[:space:]]*Domains:* ]]; then
+            domain_line=$line
+            if [[ $line == *"$CERTBOT_DOMAIN"* ]]; then
+                domain_found=1
+            fi
+            continue
+        fi
+        if [[ $domain_found -eq 1 && $line == [[:space:]]*Expiry\ Date:* ]]; then
+            expiry_line=$line
+            if [[ $line =~ \((VALID|INVALID):[[:space:]]*([0-9]+) ]]; then
+                status=${BASH_REMATCH[1]}
+                days=${BASH_REMATCH[2]}
+            fi
+            break
+        fi
+    done <<< "$output"
+
+    echo
+
+    if [[ -z $status ]]; then
+        echo "Unable to determine certificate status."
+        return 1
+    fi
+
+    if [[ $status == VALID ]]; then
+        if (( days >= 30 )); then
+            echo "Certificate is valid for $days days.  No renewal needed."
+            echo
+        else
+            echo "Certificate is valid for $days days.  Renewal needed."
+        fi
+    else
+        echo "Certificate is expired.  Renewal needed."
+    fi
+
+    if [[ $FORCE -eq 1 ]]; then
+        echo "Forcing certificate renewal"
+        echo
+        echo "Running certbot renew..."
+        echo
+        local renew_output
+        if [[ $DRY_RUN -eq 1 ]]; then
+            renew_output=$(certbot renew --dry-run 2>&1)
+        else
+            renew_output=$(certbot renew 2>&1)
+        fi
+        printf '%s\n' "$renew_output"
+        echo
+    fi
+}
+
+ACTION=""
+while [[ $# -gt 0 && "$1" == -* ]]; do
+    case "$1" in
+        --configure|--show-config|--help|-h|--renew)
+            ACTION="$1"
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        *)
+            echo >&2
+            echo "Unknown option: $1" >&2
+            show_help >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z "$ACTION" && $DRY_RUN -eq 1 ]]; then
+    ACTION="--renew"
+fi
+
+case "$ACTION" in
+    --configure)
+        configure
+        exit $?
+        ;;
+    --show-config)
+        show_config 2> >(indent_output >&2) | indent_output
+        exit $?
+        ;;
+    --renew)
+        renew 2> >(indent_output >&2) | indent_output
+        exit $?
+        ;;
+    --help|-h|"")
+        show_help
+        exit 0
+        ;;
+    *)
+        echo >&2
+        show_help >&2
+        exit 1
+        ;;
+esac

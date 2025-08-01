@@ -1,18 +1,61 @@
 #!/bin/bash
 
 # Configuration directory and files
-CONFIG_DIR="${HOME}/.fms-tools"
-CONFIG_FILE="${CONFIG_DIR}/fms-tools.config"
-CLIENTS_LIST="${CONFIG_DIR}/fmsadmin-list-clients"
-FILES_LIST="${CONFIG_DIR}/fmsadmin-list-files"
-CLOSE_LOG="${CONFIG_DIR}/fmsadmin-close-log"
+# Configuration file lives next to this script for compatibility with other tools
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/server.conf"
+
+# Portable in-place sed helper for GNU and BSD sed
+sed_inplace() {
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$1" "$2"
+    else
+        sed -i '' "$1" "$2"
+    fi
+}
+update_self_path() {
+    local var_name path
+    var_name=$(basename "${BASH_SOURCE[0]}")
+    # Use "tr" to uppercase the script name for compatibility with
+    # systems running bash versions without the "^^" expansion.
+    var_name=$(printf '%s' "$var_name" | tr '[:lower:]' '[:upper:]')
+    var_name=${var_name//-/_}
+    path="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+    if grep -q "^${var_name}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed_inplace "s|^${var_name}=.*|${var_name}=\\\"${path}\\\"|" "$CONFIG_FILE"
+    else
+        echo "${var_name}=\"${path}\"" >> "$CONFIG_FILE"
+    fi
+}
+update_self_path
+
+# Update or insert a configuration variable into $CONFIG_FILE
+set_config_var() {
+    local key="$1" value="$2"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed_inplace "s|^${key}=.*|${key}=\\\"${value}\\\"|" "$CONFIG_FILE"
+    else
+        echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
+    fi
+}
 # Track counts of files closed and currently open
 FILES_CLOSED_COUNT=0
-FILES_OPEN_COUNT=0
-RESTART_FLAG="${CONFIG_DIR}/fms-restart-needed"
-# Password encryption key shared across all fms-tools (not secret but avoids
-# plain text storage)
-ENCRYPT_KEY="fms-tools"
+
+# Output captured from fmsadmin commands
+CLIENTS_LIST_OUTPUT=""
+CLOSE_LOG_OUTPUT=""
+
+# Generate a random key for encrypting passwords when none exists
+random_key() {
+    openssl rand -hex 16
+}
+
+# Password encryption key stored in the configuration file
+ENCRYPT_KEY=""
 
 # Track whether extra command output should be displayed
 VERBOSE=0
@@ -29,18 +72,21 @@ decrypt_password() {
     printf '%s\n' "$ciphertext" | openssl enc -aes-256-cbc -a -d -salt -pbkdf2 \
         -pass pass:"$ENCRYPT_KEY" 2>/dev/null
 }
+
+# Indent all output lines by two spaces
+indent_output() { sed 's/^/  /'; }
 show_help() {
     echo
     cat <<EOF
-  fms-restarter.sh - gracefully restart FileMaker Server when it is safe to do so.
+  fms-restarter - gracefully restart FileMaker Server when it is safe to do so.
 
-  Usage: $0 [--configure|--restart-soon|--show-config|--verbose|--help]
+  Usage: $0 [--configure|--help|--restart-soon|--show-config|--verbose]
 
   --configure     Launch an interactive wizard to set up the fms-restarter configuration.
+  --help          Display this help message and exit.
   --restart-soon  Create a flag that triggers a restart on the next run.
   --show-config   Display the current configuration values.
   --verbose       Display raw output from fmsadmin commands.
-  --help          Display this help message and exit.
 
   Running without options checks whether the restart flag is present and
   restarts FileMaker Server if no clients are connected and no files are open.
@@ -52,11 +98,7 @@ show_missing_config() {
     cat >&2 <<EOF
 
   It looks like this is your first time running fms-restarter.
-  One or more configuration files were not found.
-
-  Expected directory: $CONFIG_DIR
-  Expected file:
-    $CONFIG_FILE
+  The file 'server.conf' was not found.
 
   Run "$0 --configure" to create the configuration.
   Example:
@@ -68,8 +110,6 @@ EOF
 
 configure() {
     echo
-    mkdir -p "$CONFIG_DIR"
-
     echo "  This wizard will create or update the fms-restarter configuration."
     echo
     echo "  Settings will be saved to $CONFIG_FILE"
@@ -80,8 +120,14 @@ configure() {
         if [[ -n "$FMS_PASSWORD_ENC" ]]; then
             FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
         fi
+        if grep -q '^RESTART_REQUESTED_AT=' "$CONFIG_FILE"; then
+            RESTART_REQUESTED_AT=$(grep '^RESTART_REQUESTED_AT=' "$CONFIG_FILE" | sed 's/^RESTART_REQUESTED_AT=//; s/^\"//; s/\"$//')
+        fi
+        ENCRYPT_KEY="${ENCRYPT_KEY:-$(random_key)}"
         echo "  Existing configuration detected; current values are shown in brackets."
         echo
+    else
+        ENCRYPT_KEY="$(random_key)"
     fi
 
     if [[ -z "$FMS_ADMIN" ]]; then
@@ -124,15 +170,21 @@ configure() {
     # share the same configuration file (e.g. fms-certbot-deployer).
     OTHER_CONFIG=""
     if [[ -f "$CONFIG_FILE" ]]; then
-        OTHER_CONFIG=$(grep -vE '^(FMS_ADMIN|FMS_USERNAME|FMS_PASSWORD_ENC)=' "$CONFIG_FILE" || true)
+        OTHER_CONFIG=$(grep -vE '^(ENCRYPT_KEY|FMS_ADMIN|FMS_USERNAME|FMS_PASSWORD_ENC|RESTART_REQUESTED_AT)=' "$CONFIG_FILE" || true)
     fi
 
     cat > "$CONFIG_FILE" <<EOF_CONF
+ENCRYPT_KEY="${ENCRYPT_KEY}"
 FMS_ADMIN="${FMS_ADMIN}"
 FMS_USERNAME="${FMS_USERNAME}"
 FMS_PASSWORD_ENC="${FMS_PASSWORD_ENC}"
-${OTHER_CONFIG}
 EOF_CONF
+    if [[ -n "$RESTART_REQUESTED_AT" ]]; then
+        echo "RESTART_REQUESTED_AT=\"${RESTART_REQUESTED_AT}\"" >> "$CONFIG_FILE"
+    fi
+    if [[ -n "$OTHER_CONFIG" ]]; then
+        printf '%s\n' "$OTHER_CONFIG" >> "$CONFIG_FILE"
+    fi
 
     echo
     echo "  Configuration saved to $CONFIG_FILE"
@@ -147,6 +199,7 @@ show_config() {
     fi
 
     source "$CONFIG_FILE"
+    ENCRYPT_KEY="${ENCRYPT_KEY:-$(random_key)}"
     if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
         FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
     fi
@@ -155,11 +208,16 @@ show_config() {
     FMS_ADMIN=${FMS_ADMIN//$'\r'/}
     FMS_USERNAME=${FMS_USERNAME//$'\r'/}
     FMS_PASSWORD=${FMS_PASSWORD//$'\r'/}
+    RESTART_REQUESTED_AT=${RESTART_REQUESTED_AT//$'\r'/}
 
     echo
     echo "     FMS_ADMIN: $FMS_ADMIN"
     echo "  FMS_USERNAME: $FMS_USERNAME"
     echo "  FMS_PASSWORD: $FMS_PASSWORD"
+    echo "   ENCRYPT_KEY: $ENCRYPT_KEY"
+    if [[ -n "$RESTART_REQUESTED_AT" ]]; then
+        echo "RESTART_REQUESTED_AT: $RESTART_REQUESTED_AT"
+    fi
     echo
 }
 
@@ -189,11 +247,13 @@ if [[ "$1" == "--verbose" ]]; then
 fi
 
 if [[ "$1" == "--restart-soon" ]]; then
-    if [[ ! -d "$CONFIG_DIR" ]]; then
+    if [[ ! -f "$CONFIG_FILE" ]]; then
         show_missing_config
         exit 1
     fi
+    RESTART_FLAG="${SCRIPT_DIR}/fms-restart-needed"
     touch "$RESTART_FLAG"
+    set_config_var "RESTART_REQUESTED_AT" "$(date +%s)"
     echo
     echo "  Restart flag created at $RESTART_FLAG"
     echo
@@ -202,7 +262,7 @@ elif [[ "$1" == "--configure" ]]; then
     configure
     exit $?
 elif [[ "$1" == "--show-config" ]]; then
-    show_config > >(sed 's/^/  /') 2> >(sed 's/^/  /' >&2)
+    show_config 2> >(indent_output >&2) | indent_output
     exit $?
 elif [[ "$1" == "--help" || "$1" == "-h" ]]; then
     show_help
@@ -211,29 +271,40 @@ fi
 
 function clients_are_connected () {
 
-    echo -n "fmsadmin list clients..."
-    "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" list clients > "$CLIENTS_LIST"
-    status=$?
+    local _orig_dry_run=${DRY_RUN:-0}
+    DRY_RUN=0
 
-    if [[ $status -ne 0 || ! -f "$CLIENTS_LIST" ]] ; then
+    echo -n "fmsadmin list clients..."
+    CLIENTS_LIST_OUTPUT="$($FMS_ADMIN --username "$FMS_USERNAME" --password "$FMS_PASSWORD" list clients 2>&1)"
+    status=$?
+    DRY_RUN="$_orig_dry_run"
+    if [[ $status -ne 0 ]] ; then
         echo "failed"
         return 1
     fi
 
-    count=$(wc -l < "$CLIENTS_LIST")
+    count=$(printf '%s\n' "$CLIENTS_LIST_OUTPUT" | wc -l)
     if [[ $count -eq 0 ]]; then
         echo "0 connected"
         return 1
     fi
 
-    if [[ $VERBOSE -eq 1 && -s "$CLIENTS_LIST" ]]; then
+    if [[ $VERBOSE -eq 1 && -n "$CLIENTS_LIST_OUTPUT" ]]; then
         echo
         echo
-        cat "$CLIENTS_LIST"
+        printf '%s\n' "$CLIENTS_LIST_OUTPUT"
         echo
     fi
 
     count=$((count - 1))
+    if [[ $count -eq 0 ]]; then
+        if [[ $VERBOSE -eq 1 ]]; then
+            echo -n "...0 connected"
+        else
+            echo -n "0 connected"
+        fi
+        return 1
+    fi
     # Prefix the count with an ellipsis in verbose mode so the final
     # output mirrors the non-verbose case, e.g.
     #   fmsadmin list clients...
@@ -247,40 +318,6 @@ function clients_are_connected () {
 
 }
 
-function files_are_open () {
-
-    echo
-    echo -n "fmsadmin list files..."
-    "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" list files 2>&1 > "$FILES_LIST"
-    status=$?
-
-    if [[ $status -ne 0 ]] ; then
-        echo "failed"
-        return "$status"
-    fi
-
-    FILES_OPEN_COUNT=$(grep -c . "$FILES_LIST")
-
-    if [[ $VERBOSE -eq 1 && -s "$FILES_LIST" ]]; then
-        echo
-        echo
-        cat "$FILES_LIST"
-        echo
-    fi
-
-    if [[ $FILES_OPEN_COUNT -gt 0 ]]; then
-        if [[ $VERBOSE -eq 1 ]]; then
-            echo "...${FILES_OPEN_COUNT} files open"
-        else
-            echo "${FILES_OPEN_COUNT} files open"
-        fi
-        return 0
-    else
-        echo "0 files open"
-        return 1
-    fi
-
-}
 
 function fmsadmin_close () {
 
@@ -289,21 +326,16 @@ function fmsadmin_close () {
                                 return 1
                 fi
 
-                if ! files_are_open ; then
-                                echo
-                                echo "No files are open."
-                                return 1
-                fi
-
                 echo
                 if [[ $VERBOSE -eq 1 ]]; then
                                 echo "fmsadmin close..."
                                 echo
-                                "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" close --yes | tee "$CLOSE_LOG"
-                                status=${PIPESTATUS[0]}
+                                CLOSE_LOG_OUTPUT="$($FMS_ADMIN --username "$FMS_USERNAME" --password "$FMS_PASSWORD" close --yes 2>&1)"
+                                status=$?
+                                printf '%s\n' "$CLOSE_LOG_OUTPUT"
                 else
                echo -n "fmsadmin close..."
-                                "$FMS_ADMIN" --username "$FMS_USERNAME" --password "$FMS_PASSWORD" close --yes > "$CLOSE_LOG"
+                                CLOSE_LOG_OUTPUT="$($FMS_ADMIN --username "$FMS_USERNAME" --password "$FMS_PASSWORD" close --yes 2>&1)"
                                 status=$?
                 fi
                 if [[ $status -ne 0 ]]; then
@@ -311,7 +343,7 @@ function fmsadmin_close () {
                                 return "$status"
                 fi
 
-                FILES_CLOSED_COUNT=$(grep -c '^File Closed:' "$CLOSE_LOG")
+                FILES_CLOSED_COUNT=$(printf '%s\n' "$CLOSE_LOG_OUTPUT" | grep -c '^File Closed:')
                 if [[ $VERBOSE -eq 1 ]]; then
                                 echo
                                 echo "...${FILES_CLOSED_COUNT} files closed"
@@ -322,23 +354,11 @@ function fmsadmin_close () {
 
 }
 
-function fmsadmin_open () {
-
-                files_are_open
-                return $?
-}
-
 function fms_restart () {
 
                 # fmsadmin_close performs its own client check, so avoid calling
                 # clients_are_connected twice.
                 fmsadmin_close || return 1
-
-		if files_are_open ; then
-				echo
-				echo "Files are open.  Abort."
-				return 1
-		fi
 
                 echo
                 echo "fmsadmin stop adminserver..."
@@ -378,25 +398,26 @@ function fms_restart () {
 
                 rm "$RESTART_FLAG"
 
-                while true ; do
-
-                                files_are_open
-                                if [[ $FILES_OPEN_COUNT -eq $FILES_CLOSED_COUNT ]]; then
-                                                break
-                                fi
-
+                while ! clients_are_connected >/dev/null ; do
+                                sleep 1
                 done
                 return 0
 
 }
 
 run_default() {
-    if [[ ! -d "$CONFIG_DIR" || ! -f "$CONFIG_FILE" ]]; then
+    if [[ ! -f "$CONFIG_FILE" ]]; then
         show_missing_config
         return 1
     fi
+    RESTART_FLAG="${SCRIPT_DIR}/fms-restart-needed"
+
+    # Reset any previous command output
+    CLIENTS_LIST_OUTPUT=""
+    CLOSE_LOG_OUTPUT=""
 
     source "$CONFIG_FILE"
+    ENCRYPT_KEY="${ENCRYPT_KEY:-$(random_key)}"
     if [[ -n "$FMS_PASSWORD_ENC" && -z "$FMS_PASSWORD" ]]; then
         FMS_PASSWORD=$(decrypt_password "$FMS_PASSWORD_ENC")
     fi
@@ -410,7 +431,15 @@ run_default() {
 
     echo -n "$(date)"
 
-    if [[ -f "$RESTART_FLAG" ]] ; then
+    restart_needed=0
+    if [[ -n "$RESTART_REQUESTED_AT" ]]; then
+        restart_needed=1
+    fi
+    if [[ -f "$RESTART_FLAG" ]]; then
+        restart_needed=1
+    fi
+
+    if [[ $restart_needed -eq 1 ]]; then
 
         echo " - FMS restart is needed"
 
@@ -433,9 +462,10 @@ run_default() {
 
     fi
 
-    rm -f "$CLIENTS_LIST"
-    rm -f "$FILES_LIST"
-    rm -f "$CLOSE_LOG"
+    if [[ -n "$RESTART_REQUESTED_AT" ]]; then
+        set_config_var "RESTART_REQUESTED_AT" ""
+    fi
+
 }
 
 if [[ $# -eq 0 ]]; then

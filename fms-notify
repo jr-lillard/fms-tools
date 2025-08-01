@@ -1,0 +1,302 @@
+#!/bin/bash
+
+# Configuration file lives next to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/server.conf"
+
+# Portable in-place sed helper for GNU and BSD sed
+sed_inplace() {
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$1" "$2"
+    else
+        sed -i '' "$1" "$2"
+    fi
+}
+
+update_self_path() {
+    local var_name path
+    var_name=$(basename "${BASH_SOURCE[0]}")
+    var_name=$(printf '%s' "$var_name" | tr '[:lower:]' '[:upper:]')
+    var_name=${var_name//-/_}
+    path="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+    # Set EMAIL_NOTIFIER only when missing so existing config from other
+    # utilities remains unchanged when running --configure again.
+    if ! grep -q "^${var_name}=" "$CONFIG_FILE" 2>/dev/null; then
+        echo "${var_name}=\"${path}\"" >> "$CONFIG_FILE"
+    fi
+}
+update_self_path
+
+# Update or insert a configuration variable into $CONFIG_FILE
+set_config_var() {
+    local key="$1" value="$2"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed_inplace "s|^${key}=.*|${key}=\\\"${value}\\\"|" "$CONFIG_FILE"
+    else
+        echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
+    fi
+}
+
+load_config() {
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    if [[ -z "$SMTP2GO_API_KEY" && -n "$SMTP2GO_API_KEY_ENC" && -n "$ENCRYPT_KEY" ]]; then
+        SMTP2GO_API_KEY=$(printf '%s\n' "$SMTP2GO_API_KEY_ENC" | openssl enc -aes-256-cbc -a -d -salt -pbkdf2 -pass pass:"$ENCRYPT_KEY" 2>/dev/null)
+        set_config_var "SMTP2GO_API_KEY" "$SMTP2GO_API_KEY"
+        sed_inplace "/^SMTP2GO_API_KEY_ENC=/d" "$CONFIG_FILE"
+        if ! grep -q '_ENC=' "$CONFIG_FILE"; then
+            sed_inplace "/^ENCRYPT_KEY=/d" "$CONFIG_FILE"
+        fi
+    fi
+}
+
+
+
+# Track whether extra command output should be displayed
+VERBOSE=0
+
+# Subject provided via --subject
+CLI_SUBJECT=""
+# Body provided via --body
+CLI_BODY=""
+
+# Indent all output lines by two spaces
+indent_output() { sed 's/^/  /'; }
+
+show_help() {
+    echo
+    cat <<EOH
+  email-notifier - send an email via SMTP2GO.
+
+  --body        Specify the body for the email.
+  --configure   Launch an interactive wizard to set up the configuration.
+  --help        Display this help message and exit.
+  --send        Send an email using values from server.conf.
+  --show-config Display the current configuration values.
+  --subject     Specify the subject for the email.
+  --verbose     Display the API request and response when sending.
+
+  The body is read from stdin when available; otherwise the value from --body is used.
+  Successful sends are silent unless --verbose is used.
+EOH
+    echo
+}
+
+show_missing_config() {
+    cat >&2 <<EOM
+
+  It looks like this is your first time running email-notifier.
+  The configuration file was not found.
+
+  Expected file: $CONFIG_FILE
+
+  Run "$0 --configure" to create the configuration.
+  Example:
+    $0 --configure
+EOM
+    echo >&2
+}
+
+configure() {
+    echo
+    echo "  This wizard will create or update the email-notifier configuration."
+    echo "  Settings will be saved to $CONFIG_FILE"
+    echo
+
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+
+        source "$CONFIG_FILE"
+        if [[ -z "$SMTP2GO_API_KEY" && -n "$SMTP2GO_API_KEY_ENC" && -n "$ENCRYPT_KEY" ]]; then
+            SMTP2GO_API_KEY=$(printf '%s\n' "$SMTP2GO_API_KEY_ENC" | openssl enc -aes-256-cbc -a -d -salt -pbkdf2 -pass pass:"$ENCRYPT_KEY" 2>/dev/null)
+            set_config_var "SMTP2GO_API_KEY" "$SMTP2GO_API_KEY"
+            sed_inplace "/^SMTP2GO_API_KEY_ENC=/d" "$CONFIG_FILE"
+            if ! grep -q '_ENC=' "$CONFIG_FILE"; then
+                sed_inplace "/^ENCRYPT_KEY=/d" "$CONFIG_FILE"
+            fi
+        fi
+        echo "  Existing configuration detected; current values are shown in brackets."
+        echo
+    fi
+
+    read -rp "  SMTP2GO API key [${SMTP2GO_API_KEY:-}] : " input
+    SMTP2GO_API_KEY=${input:-$SMTP2GO_API_KEY}
+    echo
+
+    read -rp "  Default sender address [${DEFAULT_SENDER:-}] : " input
+    DEFAULT_SENDER=${input:-$DEFAULT_SENDER}
+    echo
+
+    read -rp "  Recipient list (comma separated) [${RECIPIENTS:-}] : " input
+    RECIPIENTS=${input:-$RECIPIENTS}
+    echo
+
+    # Only update the notifier-specific keys so other settings remain intact
+    set_config_var "SMTP2GO_API_KEY" "$SMTP2GO_API_KEY"
+    set_config_var "DEFAULT_SENDER" "$DEFAULT_SENDER"
+    set_config_var "RECIPIENTS" "$RECIPIENTS"
+    echo "  Configuration saved to $CONFIG_FILE"
+    echo
+}
+
+show_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        show_missing_config
+        return 1
+    fi
+
+    load_config
+
+    DEFAULT_SENDER=${DEFAULT_SENDER//$'\r'/}
+    RECIPIENTS=${RECIPIENTS//$'\r'/}
+    SMTP2GO_API_KEY=${SMTP2GO_API_KEY//$'\r'/}
+
+    echo
+    local names=("DEFAULT_SENDER" "RECIPIENTS" "SMTP2GO_API_KEY")
+    local max=0 name
+    for name in "${names[@]}"; do
+        (( ${#name} > max )) && max=${#name}
+    done
+    local fmt="%${max}s: %s\n"
+    printf "$fmt" "DEFAULT_SENDER" "$DEFAULT_SENDER"
+    printf "$fmt" "RECIPIENTS" "$RECIPIENTS"
+    printf "$fmt" "SMTP2GO_API_KEY" "$SMTP2GO_API_KEY"
+    echo
+}
+
+run_default() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        show_missing_config
+        return 1
+    fi
+
+    load_config
+    DEFAULT_SENDER=${DEFAULT_SENDER//$'\r'/}
+    RECIPIENTS=${RECIPIENTS//$'\r'/}
+    SMTP2GO_API_KEY=${SMTP2GO_API_KEY//$'\r'/}
+
+    local subject body
+    if [[ -n "$CLI_SUBJECT" ]]; then
+        subject="$CLI_SUBJECT"
+    else
+        subject=${1:-"Notification from $(hostname)"}
+    fi
+
+    if [ ! -t 0 ]; then
+        body=$(cat)
+    else
+        body=${CLI_BODY:-"This is a test message from email-notifier on $(hostname)."}
+    fi
+
+    IFS=',' read -ra recips <<< "$RECIPIENTS"
+    local recips_json="["
+    for r in "${recips[@]}"; do
+        r=$(echo "$r" | xargs)
+        recips_json+="\"$r\"," 
+    done
+    recips_json="${recips_json%,}]"
+
+    local json
+    json=$(cat <<EOF_JSON
+{
+  "api_key": "$SMTP2GO_API_KEY",
+  "sender": "$DEFAULT_SENDER",
+  "to": $recips_json,
+  "subject": "$subject",
+  "text_body": "$body"
+}
+EOF_JSON
+)
+
+    local curl_output status body
+    if [[ $VERBOSE -eq 1 ]]; then
+        {
+            echo
+            echo "Request JSON:"
+            echo "$json"
+        } | indent_output
+    fi
+
+    local curl_args=(-s -w "\n%{http_code}")
+    (( VERBOSE )) && curl_args+=( -v )
+    curl_output=$(curl "${curl_args[@]}" -X POST \
+        -H "Content-Type: application/json" -d "$json" \
+        https://api.smtp2go.com/v3/email/send 2>&1)
+    status=$(printf '%s\n' "$curl_output" | tail -n1)
+    body=$(printf '%s\n' "$curl_output" | sed '$d')
+
+    if [[ $VERBOSE -eq 1 ]]; then
+        {
+            printf '%s\n' "$body"
+            echo
+        } | indent_output
+    else
+        if [[ $status -ne 200 ]]; then
+            echo "HTTP $status"
+            [[ -n $body ]] && printf '%s\n' "$body"
+        fi
+    fi
+}
+
+ACTION=""
+while [[ $# -gt 0 && "$1" == -* ]]; do
+    case "$1" in
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --subject)
+            CLI_SUBJECT="$2"
+            shift 2
+            ;;
+        --body)
+            CLI_BODY="$2"
+            shift 2
+            ;;
+        --configure|--show-config|--send|--help)
+            ACTION="$1"
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+case "$ACTION" in
+    --configure)
+        configure
+        exit $?
+        ;;
+    --show-config)
+        show_config 2> >(indent_output >&2) | indent_output
+        exit $?
+        ;;
+    --send)
+        run_default "$@"
+        exit $?
+        ;;
+    --help)
+        show_help
+        exit 0
+        ;;
+    "")
+        show_help
+        exit 1
+        ;;
+    *)
+        show_help
+        exit 1
+        ;;
+esac
+
