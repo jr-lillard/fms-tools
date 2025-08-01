@@ -3,7 +3,7 @@
 # Configuration directory and files
 # Configuration file lives next to this script for compatibility with other tools
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/server.conf"
+CONFIG_FILE="${SCRIPT_DIR}/fms-tools.conf"
 
 # Portable in-place sed helper for GNU and BSD sed
 sed_inplace() {
@@ -98,7 +98,7 @@ show_missing_config() {
     cat >&2 <<EOF
 
   It looks like this is your first time running fms-restarter.
-  The file 'server.conf' was not found.
+  The file 'fms-tools.conf' was not found.
 
   Run "$0 --configure" to create the configuration.
   Example:

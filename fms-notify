@@ -2,7 +2,7 @@
 
 # Configuration file lives next to this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/server.conf"
+CONFIG_FILE="${SCRIPT_DIR}/fms-tools.conf"
 
 # Portable in-place sed helper for GNU and BSD sed
 sed_inplace() {
@@ -75,7 +75,7 @@ show_help() {
   --body        Specify the body for the email.
   --configure   Launch an interactive wizard to set up the configuration.
   --help        Display this help message and exit.
-  --send        Send an email using values from server.conf.
+  --send        Send an email using values from fms-tools.conf.
   --show-config Display the current configuration values.
   --subject     Specify the subject for the email.
   --verbose     Display the API request and response when sending.

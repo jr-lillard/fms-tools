@@ -2,7 +2,7 @@
 
 # Configuration file lives next to this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/server.conf"
+CONFIG_FILE="${SCRIPT_DIR}/fms-tools.conf"
 
 # Portable in-place sed helper for GNU and BSD sed
 sed_inplace() {
