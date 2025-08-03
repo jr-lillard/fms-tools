@@ -124,7 +124,7 @@ show_config() {
     echo "     FMS_ADMIN: $FMS_ADMIN"
     echo "  FMS_USERNAME: $FMS_USERNAME"
     echo "  FMS_PASSWORD: $FMS_PASSWORD"
-    echo "   ENCRYPT_KEY: $ENCRYPT_KEY"
+    echo "   ENCRYPT_KEY: [hidden]"
     echo
 }
 
